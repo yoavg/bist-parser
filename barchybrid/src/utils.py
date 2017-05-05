@@ -111,6 +111,18 @@ def read_conll(fh, proj):
     print read, 'sentences read.'
 
 
+def read_conll_batch(fh, proj, batch_size=1):
+    return stream_to_batch(read_conll(fh, proj), batch_size)
+
+def stream_to_batch(stream, batch_size=1):
+    batch = []
+    for item in stream:
+        batch.append(item)
+        if len(batch) == batch_size:
+            yield batch
+            batch = []
+    if batch: yield batch
+
 def write_conll(fn, conll_gen):
     with open(fn, 'w') as fh:
         for sentence in conll_gen:

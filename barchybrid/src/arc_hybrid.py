@@ -1,9 +1,10 @@
 from dynet import *
-from utils import ParseForest, read_conll, write_conll
+from utils import ParseForest, read_conll, write_conll, read_conll_batch, stream_to_batch
 from operator import itemgetter
 from itertools import chain
 import utils, time, random
 import numpy as np
+
 
 
 class ArcHybridLSTM:
@@ -119,6 +120,41 @@ class ArcHybridLSTM:
         else:
             output = (self.outLayer.expr() * self.activation(self.hidLayer.expr() * input + self.hidBias.expr()) + self.outBias.expr())
 
+
+        return routput, output
+
+    def apply_action(self, best, stack, buf, hoffset):
+        if best[1] == 2:
+            stack.roots.append(buf.roots[0])
+            del buf.roots[0]
+
+        elif best[1] == 0:
+            child = stack.roots.pop()
+            parent = buf.roots[0]
+
+            child.pred_parent_id = parent.id
+            child.pred_relation = best[0]
+
+            bestOp = 0
+            if self.rlMostFlag:
+                parent.lstms[bestOp + hoffset] = child.lstms[bestOp + hoffset]
+            if self.rlFlag:
+                parent.lstms[bestOp + hoffset] = child.vec
+
+        elif best[1] == 1:
+            child = stack.roots.pop()
+            parent = stack.roots[-1]
+
+            child.pred_parent_id = parent.id
+            child.pred_relation = best[0]
+
+            bestOp = 1
+            if self.rlMostFlag:
+                parent.lstms[bestOp + hoffset] = child.lstms[bestOp + hoffset]
+            if self.rlFlag:
+                parent.lstms[bestOp + hoffset] = child.vec
+
+    def exprs_to_scores(self, routput, output, stack, buf, train):
         scrs, uscrs = routput.value(), output.value()
 
         #transition conditions
@@ -148,7 +184,6 @@ class ArcHybridLSTM:
         #return [ [ (rel, 0, scrs[1 + j * 2 + 0] + uscrs[1], routput[1 + j * 2 + 0] + output[1]) for j, rel in enumerate(self.irels) ] if len(stack) > 0 and len(buf) > 0 else [],
         #         [ (rel, 1, scrs[1 + j * 2 + 1] + uscrs[2], routput[1 + j * 2 + 1] + output[2]) for j, rel in enumerate(self.irels) ] if len(stack) > 1 else [],
         #         [ (None, 2, scrs[0] + uscrs[0], routput[0] + output[0]) ] if len(buf) > 0 else [] ]
-
 
     def Save(self, filename):
         self.model.save(filename)
@@ -215,63 +250,51 @@ class ArcHybridLSTM:
                 root.ivec = (self.word2lstm.expr() * root.ivec) + self.word2lstmbias.expr()
                 root.vec = tanh( root.ivec )
 
+    def init_sentence(self, sentence):
+        conll_sentence = [entry for entry in sentence if isinstance(entry, utils.ConllEntry)]
 
-    def Predict(self, conll_path):
+        conll_sentence = conll_sentence[1:] + [conll_sentence[0]]
+        self.getWordEmbeddings(conll_sentence, False)
+        stack = ParseForest([])
+        buf = ParseForest(conll_sentence)
+
+        for root in conll_sentence:
+            root.lstms = [root.vec for _ in xrange(self.nnvecs)]
+        return stack, buf
+
+
+    def Predict(self, conll_path, BATCH_SIZE=5):
         with open(conll_path, 'r') as conllFP:
-            for iSentence, sentence in enumerate(read_conll(conllFP, False)):
+            for iSentence, sentence_batch in enumerate(read_conll_batch(conllFP, False, BATCH_SIZE)):
                 self.Init()
 
-                conll_sentence = [entry for entry in sentence if isinstance(entry, utils.ConllEntry)]
-
-                conll_sentence = conll_sentence[1:] + [conll_sentence[0]]
-                self.getWordEmbeddings(conll_sentence, False)
-                stack = ParseForest([])
-                buf = ParseForest(conll_sentence)
-
-                for root in conll_sentence:
-                    root.lstms = [root.vec for _ in xrange(self.nnvecs)]
+                # init initial stack and buffer pairs into sents
+                sents = [self.init_sentence(s) for s in sentence_batch]
 
                 hoffset = 1 if self.headFlag else 0
+                while sents:
+                    new_sents = []
+                    exprs = []
+                    for (stack, buf) in sents:
+                        if (len(buf)==1 and len(stack) == 0):
+                            continue
+                        
+                        new_sents.append((stack, buf))
 
-                while not (len(buf) == 1 and len(stack) == 0):
-                    scores = self.__evaluate(stack, buf, False)
-                    best = max(chain(*scores), key = itemgetter(2) )
+                        routput, output = self.__evaluate(stack, buf, False)
+                        exprs.append((routput, output, stack, buf))
+                    sents = new_sents
 
-                    if best[1] == 2:
-                        stack.roots.append(buf.roots[0])
-                        del buf.roots[0]
-
-                    elif best[1] == 0:
-                        child = stack.roots.pop()
-                        parent = buf.roots[0]
-
-                        child.pred_parent_id = parent.id
-                        child.pred_relation = best[0]
-
-                        bestOp = 0
-                        if self.rlMostFlag:
-                            parent.lstms[bestOp + hoffset] = child.lstms[bestOp + hoffset]
-                        if self.rlFlag:
-                            parent.lstms[bestOp + hoffset] = child.vec
-
-                    elif best[1] == 1:
-                        child = stack.roots.pop()
-                        parent = stack.roots[-1]
-
-                        child.pred_parent_id = parent.id
-                        child.pred_relation = best[0]
-
-                        bestOp = 1
-                        if self.rlMostFlag:
-                            parent.lstms[bestOp + hoffset] = child.lstms[bestOp + hoffset]
-                        if self.rlFlag:
-                            parent.lstms[bestOp + hoffset] = child.vec
-
+                    #esum([r+o for r,o in exprs]).forward()
+                    for routput, output, stack, buf in exprs:
+                        scores = self.exprs_to_scores(routput, output, stack, buf, False)
+                        best = max(chain(*scores), key = itemgetter(2) )
+                        self.apply_action(best, stack, buf, hoffset)
                 renew_cg()
-                yield sentence
+                for sent in sentence_batch: yield sent
 
 
-    def Train(self, conll_path):
+    def Train(self, conll_path, BATCH_SIZE=5):
         mloss = 0.0
         errors = 0
         batch = 0
@@ -286,6 +309,7 @@ class ArcHybridLSTM:
 
         start = time.time()
 
+        st = time.time()
         with open(conll_path, 'r') as conllFP:
             shuffledData = list(read_conll(conllFP, True))
             random.shuffle(shuffledData)
@@ -295,9 +319,10 @@ class ArcHybridLSTM:
 
             self.Init()
 
-            for iSentence, sentence in enumerate(shuffledData):
+            for iSentence, sentence_batch in enumerate(stream_to_batch(shuffledData, BATCH_SIZE)):
+                #if iSentence == 201: break # TODO
                 if iSentence % 100 == 0 and iSentence != 0:
-                    print 'Processing sentence number:', iSentence, 'Loss:', eloss / etotal, 'Errors:', (float(eerrors)) / etotal, 'Labeled Errors:', (float(lerrors) / etotal) , 'Time', time.time()-start
+                    print 'Processing sentence number:', iSentence, 'Loss:', eloss / etotal, 'Errors:', (float(eerrors)) / etotal, 'Labeled Errors:', (float(lerrors) / etotal) , 'Time', time.time()-start, "sents/time",float(100*BATCH_SIZE)/(time.time()-start)
                     start = time.time()
                     eerrors = 0
                     eloss = 0.0
@@ -305,90 +330,96 @@ class ArcHybridLSTM:
                     lerrors = 0
                     ltotal = 0
 
-                conll_sentence = [entry for entry in sentence if isinstance(entry, utils.ConllEntry)]
-
-                conll_sentence = conll_sentence[1:] + [conll_sentence[0]]
-                self.getWordEmbeddings(conll_sentence, True)
-                stack = ParseForest([])
-                buf = ParseForest(conll_sentence)
-
-                for root in conll_sentence:
-                    root.lstms = [root.vec for _ in xrange(self.nnvecs)]
+                sents = [self.init_sentence(s) for s in sentence_batch]
 
                 hoffset = 1 if self.headFlag else 0
 
-                while not (len(buf) == 1 and len(stack) == 0):
-                    scores = self.__evaluate(stack, buf, True)
-                    scores.append([(None, 3, ninf ,None)])
+                while sents: 
+                    new_sents = []
+                    exprs = []
+                    for (stack, buf) in sents:
+                        if len(buf)==1 and len(stack)==0:
+                            continue
+                        new_sents.append((stack, buf))
 
-                    alpha = stack.roots[:-2] if len(stack) > 2 else []
-                    s1 = [stack.roots[-2]] if len(stack) > 1 else []
-                    s0 = [stack.roots[-1]] if len(stack) > 0 else []
-                    b = [buf.roots[0]] if len(buf) > 0 else []
-                    beta = buf.roots[1:] if len(buf) > 1 else []
+                        r,o = self.__evaluate(stack, buf, True)
+                        exprs.append((r,o, stack, buf))
+                    sents = new_sents
 
-                    left_cost  = ( len([h for h in s1 + beta if h.id == s0[0].parent_id]) +
-                                   len([d for d in b + beta if d.parent_id == s0[0].id]) )  if len(scores[0]) > 0 else 1
-                    right_cost = ( len([h for h in b + beta if h.id == s0[0].parent_id]) +
-                                   len([d for d in b + beta if d.parent_id == s0[0].id]) )  if len(scores[1]) > 0 else 1
-                    shift_cost = ( len([h for h in s1 + alpha if h.id == b[0].parent_id]) +
-                                   len([d for d in s0 + s1 + alpha if d.parent_id == b[0].id]) )  if len(scores[2]) > 0 else 1
-                    costs = (left_cost, right_cost, shift_cost, 1)
+                    for r,o,stack,buf in exprs:
+                        scores = self.exprs_to_scores(r,o, stack, buf, True)
+                        scores.append([(None, 3, ninf ,None)])
 
-                    bestValid = max(( s for s in chain(*scores) if costs[s[1]] == 0 and ( s[1] == 2 or  s[0] == stack.roots[-1].relation ) ), key=itemgetter(2))
-                    bestWrong = max(( s for s in chain(*scores) if costs[s[1]] != 0 or  ( s[1] != 2 and s[0] != stack.roots[-1].relation ) ), key=itemgetter(2))
-                    best = bestValid if ( (not self.oracle) or (bestValid[2] - bestWrong[2] > 1.0) or (bestValid[2] > bestWrong[2] and random.random() > 0.1) ) else bestWrong
+                        alpha = stack.roots[:-2] if len(stack) > 2 else []
+                        s1 = [stack.roots[-2]] if len(stack) > 1 else []
+                        s0 = [stack.roots[-1]] if len(stack) > 0 else []
+                        b = [buf.roots[0]] if len(buf) > 0 else []
+                        beta = buf.roots[1:] if len(buf) > 1 else []
 
-                    if best[1] == 2:
-                        stack.roots.append(buf.roots[0])
-                        del buf.roots[0]
+                        left_cost  = ( len([h for h in s1 + beta if h.id == s0[0].parent_id]) +
+                                    len([d for d in b + beta if d.parent_id == s0[0].id]) )  if len(scores[0]) > 0 else 1
+                        right_cost = ( len([h for h in b + beta if h.id == s0[0].parent_id]) +
+                                    len([d for d in b + beta if d.parent_id == s0[0].id]) )  if len(scores[1]) > 0 else 1
+                        shift_cost = ( len([h for h in s1 + alpha if h.id == b[0].parent_id]) +
+                                    len([d for d in s0 + s1 + alpha if d.parent_id == b[0].id]) )  if len(scores[2]) > 0 else 1
+                        costs = (left_cost, right_cost, shift_cost, 1)
 
-                    elif best[1] == 0:
-                        child = stack.roots.pop()
-                        parent = buf.roots[0]
+                        bestValid = max(( s for s in chain(*scores) if costs[s[1]] == 0 and ( s[1] == 2 or  s[0] == stack.roots[-1].relation ) ), key=itemgetter(2))
+                        bestWrong = max(( s for s in chain(*scores) if costs[s[1]] != 0 or  ( s[1] != 2 and s[0] != stack.roots[-1].relation ) ), key=itemgetter(2))
+                        best = bestValid if ( (not self.oracle) or (bestValid[2] - bestWrong[2] > 1.0) or (bestValid[2] > bestWrong[2] and random.random() > 0.1) ) else bestWrong
 
-                        child.pred_parent_id = parent.id
-                        child.pred_relation = best[0]
+                        if best[1] == 2:
+                            stack.roots.append(buf.roots[0])
+                            del buf.roots[0]
 
-                        bestOp = 0
-                        if self.rlMostFlag:
-                            parent.lstms[bestOp + hoffset] = child.lstms[bestOp + hoffset]
-                        if self.rlFlag:
-                            parent.lstms[bestOp + hoffset] = child.vec
+                        elif best[1] == 0:
+                            child = stack.roots.pop()
+                            parent = buf.roots[0]
 
-                    elif best[1] == 1:
-                        child = stack.roots.pop()
-                        parent = stack.roots[-1]
+                            child.pred_parent_id = parent.id
+                            child.pred_relation = best[0]
 
-                        child.pred_parent_id = parent.id
-                        child.pred_relation = best[0]
+                            bestOp = 0
+                            if self.rlMostFlag:
+                                parent.lstms[bestOp + hoffset] = child.lstms[bestOp + hoffset]
+                            if self.rlFlag:
+                                parent.lstms[bestOp + hoffset] = child.vec
 
-                        bestOp = 1
-                        if self.rlMostFlag:
-                            parent.lstms[bestOp + hoffset] = child.lstms[bestOp + hoffset]
-                        if self.rlFlag:
-                            parent.lstms[bestOp + hoffset] = child.vec
+                        elif best[1] == 1:
+                            child = stack.roots.pop()
+                            parent = stack.roots[-1]
 
-                    if bestValid[2] < bestWrong[2] + 1.0:
-                        loss = bestWrong[3] - bestValid[3]
-                        mloss += 1.0 + bestWrong[2] - bestValid[2]
-                        eloss += 1.0 + bestWrong[2] - bestValid[2]
-                        errs.append(loss)
+                            child.pred_parent_id = parent.id
+                            child.pred_relation = best[0]
 
-                    if best[1] != 2 and (child.pred_parent_id != child.parent_id or child.pred_relation != child.relation):
-                        lerrors += 1
-                        if child.pred_parent_id != child.parent_id:
-                            errors += 1
-                            eerrors += 1
+                            bestOp = 1
+                            if self.rlMostFlag:
+                                parent.lstms[bestOp + hoffset] = child.lstms[bestOp + hoffset]
+                            if self.rlFlag:
+                                parent.lstms[bestOp + hoffset] = child.vec
 
-                    etotal += 1
+                        if bestValid[2] < bestWrong[2] + 1.0:
+                            loss = bestWrong[3] - bestValid[3]
+                            mloss += 1.0 + bestWrong[2] - bestValid[2]
+                            eloss += 1.0 + bestWrong[2] - bestValid[2]
+                            errs.append(loss)
 
-                if len(errs) > 50: # or True:
+                        if best[1] != 2 and (child.pred_parent_id != child.parent_id or child.pred_relation != child.relation):
+                            lerrors += 1
+                            if child.pred_parent_id != child.parent_id:
+                                errors += 1
+                                eerrors += 1
+
+                        etotal += 1
+
+                if True: #len(errs) > 50: # or True:
                     #eerrs = ((esum(errs)) * (1.0/(float(len(errs)))))
-                    eerrs = esum(errs)
-                    scalar_loss = eerrs.scalar_value()
-                    eerrs.backward()
-                    self.trainer.update()
+                    if errs:
+                        eerrs = esum(errs)
+                        scalar_loss = eerrs.scalar_value()
+                        eerrs.backward()
+                        self.trainer.update()
+                    else: scalar_loss = 0
                     errs = []
                     lerrs = []
 
@@ -407,4 +438,5 @@ class ArcHybridLSTM:
             renew_cg()
 
         self.trainer.update_epoch()
-        print "Loss: ", mloss/iSentence
+        print "Loss: ", mloss/(iSentence*BATCH_SIZE)
+        print time.time() - st

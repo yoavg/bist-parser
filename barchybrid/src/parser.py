@@ -31,6 +31,8 @@ if __name__ == '__main__':
     parser.add_option("--userl", action="store_true", dest="rlMostFlag", default=False)
     parser.add_option("--predict", action="store_true", dest="predictFlag", default=False)
     parser.add_option("--dynet-mem", type="int", dest="cnn_mem", default=512)
+    parser.add_option("--batch-size", type="int", dest="batch_size", default=1)
+    parser.add_option("--dynet-autobatch", type="int", dest="dynet_autobatch", default=1)
 
     (options, args) = parser.parse_args()
     print 'Using external embedding:', options.external_embedding
@@ -52,18 +54,20 @@ if __name__ == '__main__':
 
         for epoch in xrange(options.epochs):
             print 'Starting epoch', epoch
-            parser.Train(options.conll_train)
+            parser.Train(options.conll_train, options.batch_size)
+            parser.Save(os.path.join(options.output, options.model + str(epoch+1)))
             conllu = (os.path.splitext(options.conll_dev.lower())[1] == '.conllu')
-            devpath = os.path.join(options.output, 'dev_epoch_' + str(epoch+1) + ('.conll' if not conllu else '.conllu'))
-            utils.write_conll(devpath, parser.Predict(options.conll_dev))
+            #devpath = os.path.join(options.output, 'dev_epoch_' + str(epoch+1) + ('.conll' if not conllu else '.conllu'))
+            #utils.write_conll(devpath, parser.Predict(options.conll_dev, options.batch_size))
 
             if not conllu:
-                os.system('perl src/utils/eval.pl -g ' + options.conll_dev  + ' -s ' + devpath  + ' > ' + devpath + '.txt')
+                pass
+                #os.system('perl src/utils/eval.pl -g ' + options.conll_dev  + ' -s ' + devpath  + ' > ' + devpath + '.txt')
             else:
-                os.system('python src/utils/evaluation_script/conll17_ud_eval.py -v -w src/utils/evaluation_script/weights.clas ' + options.conll_dev + ' ' + devpath + ' > ' + devpath + '.txt')
+                pass
+                #os.system('python src/utils/evaluation_script/conll17_ud_eval.py -v -w src/utils/evaluation_script/weights.clas ' + options.conll_dev + ' ' + devpath + ' > ' + devpath + '.txt')
             
             print 'Finished predicting dev'
-            parser.Save(os.path.join(options.output, options.model + str(epoch+1)))
     else:
         with open(options.params, 'r') as paramsfp:
             words, w2i, pos, rels, stored_opt = pickle.load(paramsfp)
@@ -75,8 +79,9 @@ if __name__ == '__main__':
         conllu = (os.path.splitext(options.conll_test.lower())[1] == '.conllu')
         tespath = os.path.join(options.output, 'test_pred.conll' if not conllu else 'test_pred.conllu')
         ts = time.time()
-        pred = list(parser.Predict(options.conll_test))
+        pred = list(parser.Predict(options.conll_test, options.batch_size))
         te = time.time()
+        print te - ts
         utils.write_conll(tespath, pred)
 
         if not conllu:

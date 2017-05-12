@@ -160,8 +160,7 @@ class ArcHybridLSTM:
 
     def exprs_to_scores(self, routput, output, stack, buf, train):
         scrs, uscrs = routput.value(), output.value()
-        print "SU:",scrs,uscrs
-        sys.exit()
+        #print "SU:",scrs,uscrs
 
         #transition conditions
         left_arc_conditions = len(stack) > 0 and len(buf) > 0
@@ -291,6 +290,7 @@ class ArcHybridLSTM:
                         exprs.append((routput, output, stack, buf))
                     sents = new_sents
 
+                    # run forward on all the expressions
                     _es = [_x[0] for _x in exprs]+[_x[1] for _x in exprs]
                     if _es: dy.forward(_es)
                     for routput, output, stack, buf in exprs:
@@ -326,6 +326,7 @@ class ArcHybridLSTM:
 
             self.Init()
 
+            nexamples=0
             for iSentence, sentence_batch in enumerate(stream_to_batch(shuffledData, BATCH_SIZE),1):
                 #if iSentence == 201: break # TODO
                 if iSentence % 100 == 0 and iSentence != 0:
@@ -353,12 +354,14 @@ class ArcHybridLSTM:
                         exprs.append((r,o, stack, buf))
                     sents = new_sents
 
+                    # run forward on all the expressions
                     _es = [_x[0] for _x in exprs]+[_x[1] for _x in exprs]
                     if _es: dy.forward(_es)
                     for r,o,stack,buf in exprs:
                         scores = self.exprs_to_scores(r,o, stack, buf, True)
-                        print scores[0][:3]
+                        #print scores[0][:3]
                         scores.append([(None, 3, ninf ,None)])
+
 
                         alpha = stack.roots[:-2] if len(stack) > 2 else []
                         s1 = [stack.roots[-2]] if len(stack) > 1 else []
@@ -413,6 +416,7 @@ class ArcHybridLSTM:
                             mloss += 1.0 + bestWrong[2] - bestValid[2]
                             eloss += 1.0 + bestWrong[2] - bestValid[2]
                             errs.append(loss)
+                        nexamples+=1
 
                         if best[1] != 2 and (child.pred_parent_id != child.parent_id or child.pred_relation != child.relation):
                             lerrors += 1
@@ -422,19 +426,19 @@ class ArcHybridLSTM:
 
                         etotal += 1
 
-                if True: #len(errs) > 50: # or True:
-                    #eerrs = ((esum(errs)) * (1.0/(float(len(errs)))))
-                    print "LL",len(errs)
+                if errs:
+                    eerrs = ((esum(errs)) * (1.0/(float(len(errs)))))
+                    #print "LL",len(errs)
                     scalar_loss = 0
                     if errs:
                         eerrs = esum(errs)
                         _s = time.time()
-                        #scalar_loss = eerrs.scalar_value(True)
-                        print "fw:", time.time()-_s, scalar_loss
+                        scalar_loss = eerrs.scalar_value()
+                        #print "fw:", time.time()-_s, scalar_loss
                         _s = time.time()
-                        #eerrs.backward()
-                        print "bw:", time.time()-_s
-                        #self.trainer.update()
+                        eerrs.backward()
+                        #print "bw:", time.time()-_s
+                        self.trainer.update()
                     else: scalar_loss = 0
                     errs = []
                     lerrs = []
@@ -442,17 +446,18 @@ class ArcHybridLSTM:
                     renew_cg()
                     self.Init()
 
-        if len(errs) > 0:
-            eerrs = (esum(errs)) # * (1.0/(float(len(errs))))
+        if errs:
+            eerrs = (esum(errs)) * (1.0/(float(len(errs))))
             eerrs.scalar_value()
-            #eerrs.backward()
-            #self.trainer.update()
+            eerrs.backward()
+            self.trainer.update()
 
             errs = []
             lerrs = []
 
             renew_cg()
 
-        #self.trainer.update_epoch()
-        print "Loss: ", mloss/(iSentence*BATCH_SIZE)
+        self.trainer.update_epoch()
+        print "Loss: ", mloss/nexamples
         print time.time() - st
+        nexamples=0

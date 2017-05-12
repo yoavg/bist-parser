@@ -9,6 +9,7 @@ import dynet as dy
 import random
 random.seed(1)
 
+dy.renew_cg()
 
 class ArcHybridLSTM:
     def __init__(self, words, pos, rels, w2i, options):
@@ -354,6 +355,7 @@ class ArcHybridLSTM:
                     if _es: dy.forward(_es)
                     for r,o,stack,buf in exprs:
                         scores = self.exprs_to_scores(r,o, stack, buf, True)
+                        print scores[0][:3]
                         scores.append([(None, 3, ninf ,None)])
 
                         alpha = stack.roots[:-2] if len(stack) > 2 else []
@@ -421,15 +423,16 @@ class ArcHybridLSTM:
                 if True: #len(errs) > 50: # or True:
                     #eerrs = ((esum(errs)) * (1.0/(float(len(errs)))))
                     print "LL",len(errs)
+                    scalar_loss = 0
                     if errs:
                         eerrs = esum(errs)
                         _s = time.time()
-                        scalar_loss = eerrs.scalar_value(True)
+                        #scalar_loss = eerrs.scalar_value(True)
                         print "fw:", time.time()-_s, scalar_loss
                         _s = time.time()
-                        eerrs.backward()
+                        #eerrs.backward()
                         print "bw:", time.time()-_s
-                        self.trainer.update()
+                        #self.trainer.update()
                     else: scalar_loss = 0
                     errs = []
                     lerrs = []
@@ -440,14 +443,14 @@ class ArcHybridLSTM:
         if len(errs) > 0:
             eerrs = (esum(errs)) # * (1.0/(float(len(errs))))
             eerrs.scalar_value()
-            eerrs.backward()
-            self.trainer.update()
+            #eerrs.backward()
+            #self.trainer.update()
 
             errs = []
             lerrs = []
 
             renew_cg()
 
-        self.trainer.update_epoch()
+        #self.trainer.update_epoch()
         print "Loss: ", mloss/(iSentence*BATCH_SIZE)
         print time.time() - st

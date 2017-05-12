@@ -160,6 +160,8 @@ class ArcHybridLSTM:
 
     def exprs_to_scores(self, routput, output, stack, buf, train):
         scrs, uscrs = routput.value(), output.value()
+        print "SU:",scrs,uscrs
+        sys.exit()
 
         #transition conditions
         left_arc_conditions = len(stack) > 0 and len(buf) > 0

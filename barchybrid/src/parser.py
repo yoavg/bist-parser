@@ -32,7 +32,7 @@ if __name__ == '__main__':
     parser.add_option("--predict", action="store_true", dest="predictFlag", default=False)
     parser.add_option("--dynet-mem", type="int", dest="cnn_mem", default=512)
     parser.add_option("--batch-size", type="int", dest="batch_size", default=1)
-    parser.add_option("--dynet-autobatch", type="int", dest="dynet_autobatch", default=1)
+    parser.add_option("--dynet-autobatch", type="int", dest="dynet_autobatch", default=100)
 
     (options, args) = parser.parse_args()
     print 'Using external embedding:', options.external_embedding

@@ -4,7 +4,10 @@ from operator import itemgetter
 from itertools import chain
 import utils, time, random
 import numpy as np
+import dynet as dy
 
+import random
+random.seed(1)
 
 
 class ArcHybridLSTM:
@@ -265,7 +268,7 @@ class ArcHybridLSTM:
 
     def Predict(self, conll_path, BATCH_SIZE=5):
         with open(conll_path, 'r') as conllFP:
-            for iSentence, sentence_batch in enumerate(read_conll_batch(conllFP, False, BATCH_SIZE)):
+            for iSentence, sentence_batch in enumerate(read_conll_batch(conllFP, False, BATCH_SIZE),1):
                 self.Init()
 
                 # init initial stack and buffer pairs into sents
@@ -285,7 +288,8 @@ class ArcHybridLSTM:
                         exprs.append((routput, output, stack, buf))
                     sents = new_sents
 
-                    #esum([r+o for r,o in exprs]).forward()
+                    _es = [_x[0] for _x in exprs]+[_x[1] for _x in exprs]
+                    if _es: dy.forward(_es)
                     for routput, output, stack, buf in exprs:
                         scores = self.exprs_to_scores(routput, output, stack, buf, False)
                         best = max(chain(*scores), key = itemgetter(2) )
@@ -319,7 +323,7 @@ class ArcHybridLSTM:
 
             self.Init()
 
-            for iSentence, sentence_batch in enumerate(stream_to_batch(shuffledData, BATCH_SIZE)):
+            for iSentence, sentence_batch in enumerate(stream_to_batch(shuffledData, BATCH_SIZE),1):
                 #if iSentence == 201: break # TODO
                 if iSentence % 100 == 0 and iSentence != 0:
                     print 'Processing sentence number:', iSentence, 'Loss:', eloss / etotal, 'Errors:', (float(eerrors)) / etotal, 'Labeled Errors:', (float(lerrors) / etotal) , 'Time', time.time()-start, "sents/time",float(100*BATCH_SIZE)/(time.time()-start)
@@ -346,6 +350,8 @@ class ArcHybridLSTM:
                         exprs.append((r,o, stack, buf))
                     sents = new_sents
 
+                    _es = [_x[0] for _x in exprs]+[_x[1] for _x in exprs]
+                    if _es: dy.forward(_es)
                     for r,o,stack,buf in exprs:
                         scores = self.exprs_to_scores(r,o, stack, buf, True)
                         scores.append([(None, 3, ninf ,None)])
@@ -414,10 +420,15 @@ class ArcHybridLSTM:
 
                 if True: #len(errs) > 50: # or True:
                     #eerrs = ((esum(errs)) * (1.0/(float(len(errs)))))
+                    print "LL",len(errs)
                     if errs:
                         eerrs = esum(errs)
-                        scalar_loss = eerrs.scalar_value()
+                        _s = time.time()
+                        scalar_loss = eerrs.scalar_value(True)
+                        print "fw:", time.time()-_s, scalar_loss
+                        _s = time.time()
                         eerrs.backward()
+                        print "bw:", time.time()-_s
                         self.trainer.update()
                     else: scalar_loss = 0
                     errs = []

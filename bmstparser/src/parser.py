@@ -49,7 +49,7 @@ if __name__ == '__main__':
         tespath = os.path.join(options.output, 'test_pred.conll' if not conllu else 'test_pred.conllu')
 
         ts = time.time()
-        test_res = list(parser.Predict(options.conll_test))
+        test_res = list(parser.Predict(options.conll_test, options.batch_size))
         te = time.time()
         print 'Finished predicting test.', te-ts, 'seconds.'
         utils.write_conll(tespath, test_res)
@@ -71,10 +71,12 @@ if __name__ == '__main__':
 
         for epoch in xrange(options.epochs):
             print 'Starting epoch', epoch
-            parser.Train(options.conll_train)
+            _start = time.time()
+            parser.Train(options.conll_train, options.batch_size)
+            print "time:",time.time() - _start
             conllu = (os.path.splitext(options.conll_dev.lower())[1] == '.conllu')
             devpath = os.path.join(options.output, 'dev_epoch_' + str(epoch+1) + ('.conll' if not conllu else '.conllu'))
-            utils.write_conll(devpath, parser.Predict(options.conll_dev))
+            utils.write_conll(devpath, parser.Predict(options.conll_dev, options.batch_size))
             parser.Save(os.path.join(options.output, os.path.basename(options.model) + str(epoch+1)))
 
             if not conllu:

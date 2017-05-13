@@ -55,6 +55,15 @@ def read_conll(fh):
     if len(tokens) > 1:
         yield tokens
 
+def stream_to_batch(stream, batch_size=1):
+    batch = []
+    for item in stream:
+        batch.append(item)
+        if len(batch) == batch_size:
+            yield batch
+            batch = []
+    if batch: yield batch
+
 
 def write_conll(fn, conll_gen):
     with open(fn, 'w') as fh:

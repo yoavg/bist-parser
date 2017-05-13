@@ -1,14 +1,15 @@
 from dynet import *
-from utils import read_conll, write_conll
+from utils import read_conll, write_conll, stream_to_batch
 from operator import itemgetter
 import utils, time, random, decoder
 import numpy as np
 
+random.seed(1)
+renew_cg()
 
 class MSTParserLSTM:
     def __init__(self, vocab, pos, rels, w2i, options):
         self.model = Model()
-        random.seed(1)
         self.trainer = AdamTrainer(self.model)
 
         self.activations = {'tanh': tanh, 'sigmoid': logistic, 'relu': rectify, 'tanh3': (lambda x: tanh(cwise_multiply(cwise_multiply(x, x), x)))}
@@ -95,26 +96,31 @@ class MSTParserLSTM:
             self.routBias = self.model.add_parameters((len(self.irels)))
 
 
-    def  __getExpr(self, sentence, i, j, train):
-
-        if sentence[i].headfov is None:
-            sentence[i].headfov = self.hidLayerFOH.expr() * concatenate([sentence[i].lstms[0], sentence[i].lstms[1]])
-        if sentence[j].modfov is None:
-            sentence[j].modfov  = self.hidLayerFOM.expr() * concatenate([sentence[j].lstms[0], sentence[j].lstms[1]])
+    def  __getExpr(self, s_i, s_j, train, hidbias, hid2bias, hid2layer, outlayer, act):
+        
+        if s_i.headfov is None:
+            s_i.headfov = self.hidLayerFOH.expr() * concatenate([s_i.lstms[0], s_i.lstms[1]])
+        if s_j.modfov is None:
+            s_j.modfov  = self.hidLayerFOM.expr() * concatenate([s_j.lstms[0], s_j.lstms[1]])
 
         if self.hidden2_units > 0:
-            output = self.outLayer.expr() * self.activation(self.hid2Bias.expr() + self.hid2Layer.expr() * self.activation(sentence[i].headfov + sentence[j].modfov + self.hidBias.expr())) # + self.outBias
+            output = outlayer * act(hid2bias + hid2layer * act(s_i.headfov + s_j.modfov + hidbias)) # + self.outBias
         else:
-            output = self.outLayer.expr() * self.activation(sentence[i].headfov + sentence[j].modfov + self.hidBias.expr()) # + self.outBias
+            output = outlayer * act(s_i.headfov + s_j.modfov + hidbias) # + self.outBias
 
         return output
 
 
     def __evaluate(self, sentence, train):
-        exprs = [ [self.__getExpr(sentence, i, j, train) for j in xrange(len(sentence))] for i in xrange(len(sentence)) ]
-        scores = np.array([ [output.scalar_value() for output in exprsRow] for exprsRow in exprs ])
+        ge = self.__getExpr
+        hidbias = self.hidBias.expr()
+        hid2bias = self.hid2Bias.expr()
+        hid2layer = self.hid2Layer.expr()
+        outlayer = self.outLayer.expr()
+        act = self.activation
+        exprs = [ [ge(s_i, s_j, train, hidbias, hid2bias, hid2layer, outlayer, act) for s_j in sentence] for s_i in sentence ]
 
-        return scores, exprs
+        return exprs
 
 
     def __evaluateLabel(self, sentence, i, j):
@@ -128,7 +134,7 @@ class MSTParserLSTM:
         else:
             output = self.routLayer.expr() * self.activation(sentence[i].rheadfov + sentence[j].rmodfov + self.rhidBias.expr()) + self.routBias.expr()
 
-        return output.value(), output
+        return output
 
 
     def Save(self, filename):
@@ -139,69 +145,98 @@ class MSTParserLSTM:
         self.model.load(filename)
 
 
-    def Predict(self, conll_path):
+    def Predict(self, conll_path, BATCH_SIZE=1):
         with open(conll_path, 'r') as conllFP:
-            for iSentence, sentence in enumerate(read_conll(conllFP)):
-                conll_sentence = [entry for entry in sentence if isinstance(entry, utils.ConllEntry)]
+            for iSentence, sentence_batch in enumerate(stream_to_batch(read_conll(conllFP), BATCH_SIZE)):
 
-                for entry in conll_sentence:
-                    wordvec = self.wlookup[int(self.vocab.get(entry.norm, 0))] if self.wdims > 0 else None
-                    posvec = self.plookup[int(self.pos[entry.pos])] if self.pdims > 0 else None
-                    evec = self.elookup[int(self.extrnd.get(entry.form, self.extrnd.get(entry.norm, 0)))] if self.external_embedding is not None else None
-                    entry.vec = concatenate(filter(None, [wordvec, posvec, evec]))
+                batch_exprs = []
+                sents = []
+                labels = []
+                for sentence in sentence_batch:
+                    conll_sentence = [entry for entry in sentence if isinstance(entry, utils.ConllEntry)]
 
-                    entry.lstms = [entry.vec, entry.vec]
-                    entry.headfov = None
-                    entry.modfov = None
+                    for entry in conll_sentence:
+                        wordvec = self.wlookup[int(self.vocab.get(entry.norm, 0))] if self.wdims > 0 else None
+                        posvec = self.plookup[int(self.pos[entry.pos])] if self.pdims > 0 else None
+                        evec = self.elookup[int(self.extrnd.get(entry.form, self.extrnd.get(entry.norm, 0)))] if self.external_embedding is not None else None
+                        entry.vec = concatenate(filter(None, [wordvec, posvec, evec]))
 
-                    entry.rheadfov = None
-                    entry.rmodfov = None
+                        entry.lstms = [entry.vec, entry.vec]
+                        entry.headfov = None
+                        entry.modfov = None
 
-                if self.blstmFlag:
-                    lstm_forward = self.builders[0].initial_state()
-                    lstm_backward = self.builders[1].initial_state()
+                        entry.rheadfov = None
+                        entry.rmodfov = None
 
-                    for entry, rentry in zip(conll_sentence, reversed(conll_sentence)):
-                        lstm_forward = lstm_forward.add_input(entry.vec)
-                        lstm_backward = lstm_backward.add_input(rentry.vec)
-
-                        entry.lstms[1] = lstm_forward.output()
-                        rentry.lstms[0] = lstm_backward.output()
-
-                    if self.bibiFlag:
-                        for entry in conll_sentence:
-                            entry.vec = concatenate(entry.lstms)
-
-                        blstm_forward = self.bbuilders[0].initial_state()
-                        blstm_backward = self.bbuilders[1].initial_state()
+                    if self.blstmFlag:
+                        lstm_forward = self.builders[0].initial_state()
+                        lstm_backward = self.builders[1].initial_state()
 
                         for entry, rentry in zip(conll_sentence, reversed(conll_sentence)):
-                            blstm_forward = blstm_forward.add_input(entry.vec)
-                            blstm_backward = blstm_backward.add_input(rentry.vec)
+                            lstm_forward = lstm_forward.add_input(entry.vec)
+                            lstm_backward = lstm_backward.add_input(rentry.vec)
 
-                            entry.lstms[1] = blstm_forward.output()
-                            rentry.lstms[0] = blstm_backward.output()
+                            entry.lstms[1] = lstm_forward.output()
+                            rentry.lstms[0] = lstm_backward.output()
 
-                scores, exprs = self.__evaluate(conll_sentence, True)
-                heads = decoder.parse_proj(scores)
+                        if self.bibiFlag:
+                            for entry in conll_sentence:
+                                entry.vec = concatenate(entry.lstms)
 
-                for entry, head in zip(conll_sentence, heads):
-                    entry.pred_parent_id = head
-                    entry.pred_relation = '_'
+                            blstm_forward = self.bbuilders[0].initial_state()
+                            blstm_backward = self.bbuilders[1].initial_state()
 
-                dump = False
+                            for entry, rentry in zip(conll_sentence, reversed(conll_sentence)):
+                                blstm_forward = blstm_forward.add_input(entry.vec)
+                                blstm_backward = blstm_backward.add_input(rentry.vec)
 
-                if self.labelsFlag:
-                    for modifier, head in enumerate(heads[1:]):
-                        scores, exprs = self.__evaluateLabel(conll_sentence, head, modifier+1)
-                        conll_sentence[modifier+1].pred_relation = self.irels[max(enumerate(scores), key=itemgetter(1))[0]]
+                                entry.lstms[1] = blstm_forward.output()
+                                rentry.lstms[0] = blstm_backward.output()
+                    batch_exprs.append(self.__evaluate(conll_sentence, True))
+                    sents.append(conll_sentence)
+
+
+                _s=time.time()
+                forward(batch_exprs[-1][-1] )
+                print "fw1:",time.time()-_s
+                batch_heads = []
+                _s=time.time()
+                for _i, (exprs, conll_sentence) in enumerate(zip(batch_exprs, sents)):
+                    scores = np.array([ [output.scalar_value() for output in exprsRow] for exprsRow in exprs ])
+                    heads = decoder.parse_proj(scores)
+
+                    for entry, head in zip(conll_sentence, heads):
+                        entry.pred_parent_id = head
+                        entry.pred_relation = '_'
+                    batch_heads.append(heads)
+                    dump = False
+                print "decode:",time.time()-_s
+
+                if self.labelsFlag: # TODO this is currently not batched..
+                    labels = []
+                    _exps = []
+                    for (heads, conll_sentence) in zip(batch_heads, sents):
+                        labels_exprs = []
+                        for modifier, head in enumerate(heads[1:]):
+                            exprs = self.__evaluateLabel(conll_sentence, head, modifier+1)
+                            _exps.append(exprs)
+                            labels_exprs.append((head,modifier,exprs))
+                        labels.append(labels_exprs)
+                    
+
+                    _s=time.time()
+                    forward(_exps)
+                    print "fw-L:",time.time()-_s
+                    for lbls,conll_sentence in zip(labels, sents):
+                        for (head, modifier, exprs) in lbls:
+                            scores = exprs.value()
+                            conll_sentence[modifier+1].pred_relation = self.irels[max(enumerate(scores), key=itemgetter(1))[0]]
 
                 renew_cg()
                 if not dump:
-                    yield sentence
+                    for sentence in sentence_batch: yield sentence
 
-
-    def Train(self, conll_path):
+    def Train(self, conll_path, BATCH_SIZE=1):
         errors = 0
         batch = 0
         eloss = 0.0
@@ -218,9 +253,9 @@ class MSTParserLSTM:
             lerrs = []
             eeloss = 0.0
 
-            for iSentence, sentence in enumerate(shuffledData):
+            for iSentence, sentence_batch in enumerate(stream_to_batch(shuffledData, BATCH_SIZE)):
                 if iSentence % 100 == 0 and iSentence != 0:
-                    print 'Processing sentence number:', iSentence, 'Loss:', eloss / etotal, 'Errors:', (float(eerrors)) / etotal, 'Time', time.time()-start
+                    print 'Processing sentence number:', iSentence, 'Loss:', eloss / etotal, 'Errors:', (float(eerrors)) / etotal, 'Time', time.time()-start, (100*BATCH_SIZE)/(time.time()-start)
                     start = time.time()
                     eerrors = 0
                     eloss = 0.0
@@ -228,85 +263,120 @@ class MSTParserLSTM:
                     lerrors = 0
                     ltotal = 0
 
-                conll_sentence = [entry for entry in sentence if isinstance(entry, utils.ConllEntry)]
+                batch_exprs = []
+                sents = []
+                golds = []
+                labels = []
+                for sentence in sentence_batch:
+                    conll_sentence = [entry for entry in sentence if isinstance(entry, utils.ConllEntry)]
+                    sents.append(conll_sentence)
 
-                for entry in conll_sentence:
-                    c = float(self.wordsCount.get(entry.norm, 0))
-                    dropFlag = (random.random() < (c/(0.25+c)))
-                    wordvec = self.wlookup[int(self.vocab.get(entry.norm, 0)) if dropFlag else 0] if self.wdims > 0 else None
-                    posvec = self.plookup[int(self.pos[entry.pos])] if self.pdims > 0 else None
-                    evec = None
+                    gold = [entry.parent_id for entry in conll_sentence]
+                    golds.append(gold)
 
-                    if self.external_embedding is not None:
-                        evec = self.elookup[self.extrnd.get(entry.form, self.extrnd.get(entry.norm, 0)) if (dropFlag or (random.random() < 0.5)) else 0]
-                    entry.vec = concatenate(filter(None, [wordvec, posvec, evec]))
+                    # initialize sentence
+                    for entry in conll_sentence:
+                        c = float(self.wordsCount.get(entry.norm, 0))
+                        dropFlag = (random.random() < (c/(0.25+c)))
+                        wordvec = self.wlookup[int(self.vocab.get(entry.norm, 0)) if dropFlag else 0] if self.wdims > 0 else None
+                        posvec = self.plookup[int(self.pos[entry.pos])] if self.pdims > 0 else None
+                        evec = None
 
-                    entry.lstms = [entry.vec, entry.vec]
-                    entry.headfov = None
-                    entry.modfov = None
+                        if self.external_embedding is not None:
+                            evec = self.elookup[self.extrnd.get(entry.form, self.extrnd.get(entry.norm, 0)) if (dropFlag or (random.random() < 0.5)) else 0]
+                        entry.vec = concatenate(filter(None, [wordvec, posvec, evec]))
 
-                    entry.rheadfov = None
-                    entry.rmodfov = None
+                        entry.lstms = [entry.vec, entry.vec]
+                        entry.headfov = None
+                        entry.modfov = None
 
-                if self.blstmFlag:
-                    lstm_forward = self.builders[0].initial_state()
-                    lstm_backward = self.builders[1].initial_state()
+                        entry.rheadfov = None
+                        entry.rmodfov = None
 
-                    for entry, rentry in zip(conll_sentence, reversed(conll_sentence)):
-                        lstm_forward = lstm_forward.add_input(entry.vec)
-                        lstm_backward = lstm_backward.add_input(rentry.vec)
-
-                        entry.lstms[1] = lstm_forward.output()
-                        rentry.lstms[0] = lstm_backward.output()
-
-                    if self.bibiFlag:
-                        for entry in conll_sentence:
-                            entry.vec = concatenate(entry.lstms)
-
-                        blstm_forward = self.bbuilders[0].initial_state()
-                        blstm_backward = self.bbuilders[1].initial_state()
+                    # bilstm encode
+                    if self.blstmFlag:
+                        lstm_forward = self.builders[0].initial_state()
+                        lstm_backward = self.builders[1].initial_state()
 
                         for entry, rentry in zip(conll_sentence, reversed(conll_sentence)):
-                            blstm_forward = blstm_forward.add_input(entry.vec)
-                            blstm_backward = blstm_backward.add_input(rentry.vec)
+                            lstm_forward = lstm_forward.add_input(entry.vec)
+                            lstm_backward = lstm_backward.add_input(rentry.vec)
 
-                            entry.lstms[1] = blstm_forward.output()
-                            rentry.lstms[0] = blstm_backward.output()
+                            entry.lstms[1] = lstm_forward.output()
+                            rentry.lstms[0] = lstm_backward.output()
+                        
+                        if self.bibiFlag:
+                            for entry in conll_sentence:
+                                entry.vec = concatenate(entry.lstms)
 
-                scores, exprs = self.__evaluate(conll_sentence, True)
-                gold = [entry.parent_id for entry in conll_sentence]
-                heads = decoder.parse_proj(scores, gold if self.costaugFlag else None)
+                            blstm_forward = self.bbuilders[0].initial_state()
+                            blstm_backward = self.bbuilders[1].initial_state()
 
-                if self.labelsFlag:
-                    for modifier, head in enumerate(gold[1:]):
-                        rscores, rexprs = self.__evaluateLabel(conll_sentence, head, modifier+1)
-                        goldLabelInd = self.rels[conll_sentence[modifier+1].relation]
-                        wrongLabelInd = max(((l, scr) for l, scr in enumerate(rscores) if l != goldLabelInd), key=itemgetter(1))[0]
-                        if rscores[goldLabelInd] < rscores[wrongLabelInd] + 1:
-                            lerrs.append(rexprs[wrongLabelInd] - rexprs[goldLabelInd])
+                            for entry, rentry in zip(conll_sentence, reversed(conll_sentence)):
+                                blstm_forward = blstm_forward.add_input(entry.vec)
+                                blstm_backward = blstm_backward.add_input(rentry.vec)
 
-                e = sum([1 for h, g in zip(heads[1:], gold[1:]) if h != g])
-                eerrors += e
-                if e > 0:
-                    loss = [(exprs[h][i] - exprs[g][i]) for i, (h,g) in enumerate(zip(heads, gold)) if h != g] # * (1.0/float(e))
-                    eloss += (e)
-                    mloss += (e)
-                    errs.extend(loss)
+                                entry.lstms[1] = blstm_forward.output()
+                                rentry.lstms[0] = blstm_backward.output()
 
-                etotal += len(conll_sentence)
+                    # compute all arc score-expressions
+                    batch_exprs.append(self.__evaluate(conll_sentence, True))
 
-                if iSentence % 1 == 0 or len(errs) > 0 or len(lerrs) > 0:
-                    eeloss = 0.0
+                    # labeling?
+                    _exps = []
+                    if self.labelsFlag:
+                        labels_exprs = []
+                        for modifier, head in enumerate(gold[1:]):
+                            rexprs = self.__evaluateLabel(conll_sentence, head, modifier+1)
+                            labels_exprs.append((rexprs, head, modifier))
+                            _exps.append(rexprs)
+                        labels.append(labels_exprs)
 
-                    if len(errs) > 0 or len(lerrs) > 0:
-                        eerrs = (esum(errs + lerrs)) #* (1.0/(float(len(errs))))
-                        eerrs.scalar_value()
-                        eerrs.backward()
-                        self.trainer.update()
-                        errs = []
-                        lerrs = []
 
-                    renew_cg()
+                # now do the actual scoring
+                _s = time.time()
+                forward(batch_exprs[-1][-1] + _exps)
+                print "fw1t:",time.time()-_s
+                for _i, (exprs, conll_sentence) in enumerate(zip(batch_exprs, sents)):
+                    scores = np.array([ [output.scalar_value() for output in exprsRow] for exprsRow in exprs ])
+                    gold = golds[_i]
+                    heads = decoder.parse_proj(scores, gold if self.costaugFlag else None)
+
+                    # TODO labeling is inot batched
+                    if self.labelsFlag:
+                        for rexprs, head, modifier in labels[_i]:
+                            rscores = rexprs.value()
+                            goldLabelInd = self.rels[conll_sentence[modifier+1].relation]
+                            wrongLabelInd = max(((l, scr) for l, scr in enumerate(rscores) if l != goldLabelInd), key=itemgetter(1))[0]
+                            if rscores[goldLabelInd] < rscores[wrongLabelInd] + 1:
+                                lerrs.append(rexprs[wrongLabelInd] - rexprs[goldLabelInd])
+
+                    e = sum([1 for h, g in zip(heads[1:], gold[1:]) if h != g])
+                    eerrors += e
+                    if e > 0:
+                        loss = [(exprs[h][i] - exprs[g][i]) for i, (h,g) in enumerate(zip(heads, gold)) if h != g] # * (1.0/float(e))
+                        eloss += (e)
+                        mloss += (e)
+                        errs.extend(loss)
+
+                    etotal += len(conll_sentence)
+
+                    if iSentence % 1 == 0 or len(errs) > 0 or len(lerrs) > 0:
+                        eeloss = 0.0
+
+                if len(errs) > 0 or len(lerrs) > 0:
+                    eerrs = (esum(errs + lerrs)) #* (1.0/(float(len(errs))))
+                    _s = time.time()
+                    eerrs.scalar_value()
+                    print "fw2t",time.time()-_s
+                    _s = time.time()
+                    eerrs.backward()
+                    print "bw2t",time.time()-_s
+                    self.trainer.update()
+                    errs = []
+                    lerrs = []
+
+                renew_cg()
 
         if len(errs) > 0:
             eerrs = (esum(errs + lerrs)) #* (1.0/(float(len(errs))))

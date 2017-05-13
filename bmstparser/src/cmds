@@ -1,0 +1,4 @@
+train:
+    parser.py --train ../../data/english_ptb_test.conll --model m --bibi-lstm --dynet-seed 1 --batch-size 60 --dynet-autobatch 1 --dev ../../data/english_ptb_test.conll --hidden 200 --hidden2 200 --dynet-mem 1024 --epochs 1
+predict:
+    parser.py --test ../../data/english_ptb_test.conll --model results/m1 --params results/params.pickle --predict --batch-size 60 --dynet-autobatch 1 --dynet-mem 1024

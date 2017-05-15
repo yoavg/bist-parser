@@ -1,4 +1,4 @@
 # train
-python parser.py --train english_ptb_test.conll --model nm --epochs 5 --userlmost --userl --batch-size 32 --hidden 200 --lstmdims 200 --dynet-mem 1024 --dynet-autobatch 1 --dynet-seed 1
+python parser.py --train english_ptb_test.conll --model nm --epochs 5 --userlmost --userl --batch-size 32 --hidden 200 --lstmdims 200 --dynet-mem 1024 --dynet-autobatch 1 --dynet-seed 1 --bibi-lstm
 # test
-python parser.py --test english_ptb_test.conll --model results/nm5 --predict --userlmost --userl --params results/params.pickle --batch-size 32 --dynet-autobatch 1
+python parser.py --test english_ptb_test.conll --model results/nm5 --predict --userlmost --userl --params results/params.pickle --batch-size 32 --dynet-autobatch 1 --bibi-lstm

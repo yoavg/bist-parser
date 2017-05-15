@@ -52,9 +52,16 @@ if __name__ == '__main__':
         print 'Initializing blstm arc hybrid:'
         parser = ArcHybridLSTM(words, pos, rels, w2i, options)
 
+        
+        total_time = 0.0
+        nsents, nwords = 0, 0
         for epoch in xrange(options.epochs):
             print 'Starting epoch', epoch
-            parser.Train(options.conll_train, options.batch_size)
+            _s = time.time()
+            ns, nw = parser.Train(options.conll_train, options.batch_size)
+            nsents += ns
+            nwords += nw
+            total_time += (time.time()-_s)
             parser.Save(os.path.join(options.output, options.model + str(epoch+1)))
             conllu = (os.path.splitext(options.conll_dev.lower())[1] == '.conllu')
             #devpath = os.path.join(options.output, 'dev_epoch_' + str(epoch+1) + ('.conll' if not conllu else '.conllu'))
@@ -67,7 +74,8 @@ if __name__ == '__main__':
                 pass
                 #os.system('python src/utils/evaluation_script/conll17_ud_eval.py -v -w src/utils/evaluation_script/weights.clas ' + options.conll_dev + ' ' + devpath + ' > ' + devpath + '.txt')
             
-            print 'Finished predicting dev'
+            #print 'Finished predicting dev'
+        print "Total time:",total_time, "words/sec:",nwords/total_time, "sents/sec:",nsents/total_time
     else:
         with open(options.params, 'r') as paramsfp:
             words, w2i, pos, rels, stored_opt = pickle.load(paramsfp)
@@ -81,13 +89,17 @@ if __name__ == '__main__':
         ts = time.time()
         pred = list(parser.Predict(options.conll_test, options.batch_size))
         te = time.time()
-        print te - ts
+        pred_time = te - ts
+        nsents = len(pred)
+        nwords = sum([len(s) for s in pred])
+        print pred_time, "sents/sec:",nsents/pred_time, "words/sec:",nwords/pred_time
+        print nsents,nwords
         utils.write_conll(tespath, pred)
 
-        if not conllu:
-            os.system('perl src/utils/eval.pl -g ' + options.conll_test + ' -s ' + tespath  + ' > ' + tespath + '.txt')
-        else:
-            os.system('python src/utils/evaluation_script/conll17_ud_eval.py -v -w src/utils/evaluation_script/weights.clas ' + options.conll_test + ' ' + tespath + ' > ' + testpath + '.txt')
+        #if not conllu:
+        #    os.system('perl src/utils/eval.pl -g ' + options.conll_test + ' -s ' + tespath  + ' > ' + tespath + '.txt')
+        #else:
+        #    os.system('python src/utils/evaluation_script/conll17_ud_eval.py -v -w src/utils/evaluation_script/weights.clas ' + options.conll_test + ' ' + tespath + ' > ' + testpath + '.txt')
         
         print 'Finished predicting test',te-ts
 

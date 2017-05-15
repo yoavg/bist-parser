@@ -269,6 +269,8 @@ class ArcHybridLSTM:
 
 
     def Predict(self, conll_path, BATCH_SIZE=5):
+        nwords=0
+        nsents=0
         with open(conll_path, 'r') as conllFP:
             for iSentence, sentence_batch in enumerate(read_conll_batch(conllFP, False, BATCH_SIZE),1):
                 self.Init()
@@ -300,7 +302,6 @@ class ArcHybridLSTM:
                 renew_cg()
                 for sent in sentence_batch: yield sent
 
-
     def Train(self, conll_path, BATCH_SIZE=5):
         mloss = 0.0
         errors = 0
@@ -310,6 +311,8 @@ class ArcHybridLSTM:
         lerrors = 0
         etotal = 0
         ltotal = 0
+        nwords = 0
+        nsents = 0
         ninf = -float('inf')
 
         hoffset = 1 if self.headFlag else 0
@@ -318,7 +321,9 @@ class ArcHybridLSTM:
 
         st = time.time()
         with open(conll_path, 'r') as conllFP:
+            _s = time.time()
             shuffledData = list(read_conll(conllFP, True))
+            print time.time()-_s
             random.shuffle(shuffledData)
 
             errs = []
@@ -328,17 +333,10 @@ class ArcHybridLSTM:
 
             nexamples=0
             for iSentence, sentence_batch in enumerate(stream_to_batch(shuffledData, BATCH_SIZE),1):
-                #if iSentence == 201: break # TODO
-                if iSentence % 100 == 0 and iSentence != 0:
-                    print 'Processing sentence number:', iSentence, 'Loss:', eloss / etotal, 'Errors:', (float(eerrors)) / etotal, 'Labeled Errors:', (float(lerrors) / etotal) , 'Time', time.time()-start, "sents/time",float(100*BATCH_SIZE)/(time.time()-start)
-                    start = time.time()
-                    eerrors = 0
-                    eloss = 0.0
-                    etotal = 0
-                    lerrors = 0
-                    ltotal = 0
 
                 sents = [self.init_sentence(s) for s in sentence_batch]
+                nsents += len(sents)
+                nwords += sum([len(s) for s in sentence_batch])
 
                 hoffset = 1 if self.headFlag else 0
 
@@ -359,9 +357,7 @@ class ArcHybridLSTM:
                     if _es: dy.forward(_es)
                     for r,o,stack,buf in exprs:
                         scores = self.exprs_to_scores(r,o, stack, buf, True)
-                        #print scores[0][:3]
                         scores.append([(None, 3, ninf ,None)])
-
 
                         alpha = stack.roots[:-2] if len(stack) > 2 else []
                         s1 = [stack.roots[-2]] if len(stack) > 1 else []
@@ -428,7 +424,6 @@ class ArcHybridLSTM:
 
                 if errs:
                     eerrs = ((esum(errs)) * (1.0/(float(len(errs)))))
-                    #print "LL",len(errs)
                     scalar_loss = 0
                     if errs:
                         eerrs = esum(errs)
@@ -461,3 +456,4 @@ class ArcHybridLSTM:
         print "Loss: ", mloss/nexamples
         print time.time() - st
         nexamples=0
+        return nsents, nwords

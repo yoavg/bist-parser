@@ -5,11 +5,28 @@ from itertools import chain
 import utils, time, random
 import numpy as np
 import dynet as dy
+from collections import defaultdict
 
 import random
 random.seed(1)
 
 dy.renew_cg()
+
+class Timer:
+   def __init__(self):
+      self.t = defaultdict(float)
+      self.s = 0
+      self.w = defaultdict(int)
+   def start(self):
+      self.s = time.time()
+      #print "start"
+   def stop(self, msg):
+      self.t[msg] += (time.time()-self.s)
+      self.w[msg] += 1
+      #print "stop",msg,(time.time()-self.s)
+   def report(self):
+      for k,v in self.t.iteritems():
+         print v,k,self.w[k],v/self.w[k]
 
 class ArcHybridLSTM:
     def __init__(self, words, pos, rels, w2i, options):
@@ -68,9 +85,9 @@ class ArcHybridLSTM:
                                      VanillaLSTMBuilder(1, self.ldims, self.ldims * 0.5, self.model)]
         elif self.blstmFlag:
             if self.layers > 0:
-                self.surfaceBuilders = [VanillaLSTMBuilder(self.layers, dims, self.ldims * 0.5, self.model), LSTMBuilder(self.layers, dims, self.ldims * 0.5, self.model)]
+                self.surfaceBuilders = [VanillaLSTMBuilder(self.layers, dims, self.ldims * 0.5, self.model), VanillaLSTMBuilder(self.layers, dims, self.ldims * 0.5, self.model)]
             else:
-                self.surfaceBuilders = [SimpleRNNBuilder(1, dims, self.ldims * 0.5, self.model), LSTMBuilder(1, dims, self.ldims * 0.5, self.model)]
+                self.surfaceBuilders = [SimpleRNNBuilder(1, dims, self.ldims * 0.5, self.model), SimpleRNNBuilder(1, dims, self.ldims * 0.5, self.model)]
 
         self.hidden_units = options.hidden_units
         self.hidden2_units = options.hidden2_units
@@ -116,14 +133,10 @@ class ArcHybridLSTM:
 
         if self.hidden2_units > 0:
             routput = (self.routLayer.expr() * self.activation(self.rhid2Bias.expr() + self.rhid2Layer.expr() * self.activation(self.rhidLayer.expr() * input + self.rhidBias.expr())) + self.routBias.expr())
-        else:
-            routput = (self.routLayer.expr() * self.activation(self.rhidLayer.expr() * input + self.rhidBias.expr()) + self.routBias.expr())
-
-        if self.hidden2_units > 0:
             output = (self.outLayer.expr() * self.activation(self.hid2Bias.expr() + self.hid2Layer.expr() * self.activation(self.hidLayer.expr() * input + self.hidBias.expr())) + self.outBias.expr())
         else:
-            output = (self.outLayer.expr() * self.activation(self.hidLayer.expr() * input + self.hidBias.expr()) + self.outBias.expr())
-
+            routput = (self.routLayer.expr() * self.activation(self.rhidLayer.expr() * input + self.rhidBias.expr()) + self.routBias.expr())
+            output =  (self.outLayer.expr()  * self.activation(self.hidLayer.expr()  * input + self.hidBias.expr())  + self.outBias.expr())
 
         return routput, output
 
@@ -174,9 +187,12 @@ class ArcHybridLSTM:
             output0 = output[0]
             output1 = output[1]
             output2 = output[2]
-            ret = [ [ (rel, 0, scrs[1 + j * 2] + uscrs1, routput[1 + j * 2 ] + output1) for j, rel in enumerate(self.irels) ] if left_arc_conditions else [],
-                    [ (rel, 1, scrs[2 + j * 2] + uscrs2, routput[2 + j * 2 ] + output2) for j, rel in enumerate(self.irels) ] if right_arc_conditions else [],
-                    [ (None, 2, scrs[0] + uscrs0, routput[0] + output0) ] if shift_conditions else [] ]
+            #ret = [ [ (rel, 0, scrs[1 + j * 2] + uscrs1, routput[1 + j * 2 ] + output1) for j, rel in enumerate(self.irels) ] if left_arc_conditions else [],
+            #        [ (rel, 1, scrs[2 + j * 2] + uscrs2, routput[2 + j * 2 ] + output2) for j, rel in enumerate(self.irels) ] if right_arc_conditions else [],
+            #        [ (None, 2, scrs[0] + uscrs0, routput[0] + output0) ] if shift_conditions else [] ]
+            ret = [ [ (rel, 0, scrs[1 + j * 2] + uscrs1, (1 + j * 2,1)) for j, rel in enumerate(self.irels) ] if left_arc_conditions else [],
+                    [ (rel, 1, scrs[2 + j * 2] + uscrs2, (2 + j * 2,2)) for j, rel in enumerate(self.irels) ] if right_arc_conditions else [],
+                    [ (None, 2, scrs[0] + uscrs0, (0,0)) ] if shift_conditions else [] ]
         else:
             s1,r1 = max(zip(scrs[1::2],self.irels))
             s2,r2 = max(zip(scrs[2::2],self.irels))
@@ -302,7 +318,7 @@ class ArcHybridLSTM:
                 renew_cg()
                 for sent in sentence_batch: yield sent
 
-    def Train(self, conll_path, BATCH_SIZE=5):
+    def Train(self, conll_path, BATCH_SIZE=5, MAX_SENTS=0):
         mloss = 0.0
         errors = 0
         batch = 0
@@ -319,12 +335,15 @@ class ArcHybridLSTM:
 
         start = time.time()
 
+        T = Timer()
         st = time.time()
         with open(conll_path, 'r') as conllFP:
             _s = time.time()
             shuffledData = list(read_conll(conllFP, True))
+            if MAX_SENTS>0: shuffledData = shuffledData[:MAX_SENTS]
             print time.time()-_s
             random.shuffle(shuffledData)
+        #    shuffledData = [x for l,x in sorted([(-len(s),s) for s in shuffledData])][10:]
 
             errs = []
             eeloss = 0.0
@@ -334,9 +353,17 @@ class ArcHybridLSTM:
             nexamples=0
             for iSentence, sentence_batch in enumerate(stream_to_batch(shuffledData, BATCH_SIZE),1):
 
+                T.start()
                 sents = [self.init_sentence(s) for s in sentence_batch]
+                T.stop("init")
                 nsents += len(sents)
                 nwords += sum([len(s) for s in sentence_batch])
+
+                # eval fw lstms
+                #print "fw:",len(sents)
+                T.start()
+                sentence_batch[-1][-1].lstms[1].forward()
+                T.stop("fw")
 
                 hoffset = 1 if self.headFlag else 0
 
@@ -348,15 +375,25 @@ class ArcHybridLSTM:
                             continue
                         new_sents.append((stack, buf))
 
+                        T.start()
                         r,o = self.__evaluate(stack, buf, True)
+                        T.stop("_eval")
                         exprs.append((r,o, stack, buf))
                     sents = new_sents
 
                     # run forward on all the expressions
-                    _es = [_x[0] for _x in exprs]+[_x[1] for _x in exprs]
-                    if _es: dy.forward(_es)
+                    #print "fw2",len(exprs)
+                    T.start()
+                    if exprs: exprs[-1][1].forward()
+                    #_es = [_x[0] for _x in exprs]+[_x[1] for _x in exprs]
+                    #if _es: dy.forward(_es)
+                    T.stop("fw2")
+                    #T.stop("fw2:%s" % len(exprs))
+                    #print "donw"
                     for r,o,stack,buf in exprs:
+                        T.start()
                         scores = self.exprs_to_scores(r,o, stack, buf, True)
+                        T.stop("to_scr")
                         scores.append([(None, 3, ninf ,None)])
 
                         alpha = stack.roots[:-2] if len(stack) > 2 else []
@@ -408,7 +445,10 @@ class ArcHybridLSTM:
                                 parent.lstms[bestOp + hoffset] = child.vec
 
                         if bestValid[2] < bestWrong[2] + 1.0:
-                            loss = bestWrong[3] - bestValid[3]
+                            vri,voi = bestValid[3]
+                            wri,woi = bestWrong[3]
+                            loss = (r[wri]+o[woi]) - (r[vri]+o[voi])
+                            #loss = bestWrong[3] - bestValid[3]
                             mloss += 1.0 + bestWrong[2] - bestValid[2]
                             eloss += 1.0 + bestWrong[2] - bestValid[2]
                             errs.append(loss)
@@ -428,12 +468,17 @@ class ArcHybridLSTM:
                     if errs:
                         eerrs = esum(errs)
                         _s = time.time()
+                        T.start()
                         scalar_loss = eerrs.scalar_value()
+                        T.stop("fw3")
                         #print "fw:", time.time()-_s, scalar_loss
-                        _s = time.time()
+                        T.start()
                         eerrs.backward()
+                        T.stop("bw")
                         #print "bw:", time.time()-_s
+                        T.start()
                         self.trainer.update()
+                        T.stop("update")
                     else: scalar_loss = 0
                     errs = []
                     lerrs = []
@@ -456,4 +501,5 @@ class ArcHybridLSTM:
         print "Loss: ", mloss/nexamples
         print time.time() - st
         nexamples=0
+        T.report()
         return nsents, nwords
